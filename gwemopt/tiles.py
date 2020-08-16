@@ -142,11 +142,16 @@ def galaxy(params, map_struct, catalog_struct):
 
         moc_struct = {}
         cnt = 0
-        for ra, dec, Sloc, S, Smass in zip(catalog_struct_new["ra"], catalog_struct_new["dec"], catalog_struct_new["Sloc"], catalog_struct_new["S"], catalog_struct_new["Smass"]):
+        for ra, dec, Sloc, S, Smass, galaxies in zip(catalog_struct_new["ra"], catalog_struct_new["dec"], catalog_struct_new["Sloc"], catalog_struct_new["S"], catalog_struct_new["Smass"], catalog_struct_new["galaxies"]):
             moc_struct[cnt] = gwemopt.moc.Fov2Moc(params, config_struct, telescope, ra, dec, nside)
+            moc_struct[cnt]["galaxies"] = galaxies
             cnt = cnt + 1
-        
-        tile_struct = powerlaw_tiles_struct(params, config_struct, telescope, map_struct, moc_struct)
+    
+        if params["timeallocationType"] == "absmag":
+            tile_struct = absmag_tiles_struct(params, config_struct, telescope, map_struct, moc_struct)
+        elif params["timeallocationType"] == "powerlaw":
+            tile_struct = powerlaw_tiles_struct(params, config_struct, telescope, map_struct, moc_struct, catalog_struct=catalog_struct)
+                
         tile_struct = gwemopt.segments.get_segments_tiles(params, config_struct, tile_struct)
 
         cnt = 0
@@ -157,7 +162,7 @@ def galaxy(params, map_struct, catalog_struct):
                 tile_struct[cnt]['prob'] = S
             elif params["galaxy_grade"] == "Smass":
                 tile_struct[cnt]['prob'] = Smass
-                
+
             tile_struct[cnt]['galaxies'] = galaxies
             if config_struct["FOV_type"] == "square":
                 tile_struct[cnt]['area'] = params["config"][telescope]['FOV']**2
@@ -239,7 +244,7 @@ def absmag_tiles_struct(params, config_struct, telescope, map_struct, tile_struc
     ranked_tile_probs = ranked_tile_probs / np.nansum(ranked_tile_probs)
 
     if "distmed" in map_struct:
-        distmed = map_struct["distmed"]
+        distmed = map_struct["distmed"] + 2*map_struct["diststd"]
         distmed[distmed<=0] = np.nan
         distmed[~np.isfinite(distmed)] = np.nan
         #distmed[distmed<np.nanmedian(distmed)/4.0] = np.nanmedian(distmed)/4.0
@@ -257,11 +262,15 @@ def absmag_tiles_struct(params, config_struct, telescope, map_struct, tile_struc
         nexp = np.round(np.exp(nmag*np.log(2.5)))
         nexp[nexp<0] = 0.0
         nexp = nexp + 1
-      
+
     keys = tile_struct.keys()
     ranked_tile_times = np.zeros((len(ranked_tile_probs),len(params["exposuretimes"])))
     for ii in range(len(params["exposuretimes"])):
-        ranked_tile_times[ranked_tile_probs>0,ii] = config_struct["exposuretime_orig"]*nexp[ranked_tile_probs>0]
+        idx = np.where(ranked_tile_probs>0)[0]
+        ranked_tile_times[idx,ii] = config_struct["exposuretime_orig"]*nexp[idx]
+        if "max_exposure" in config_struct.keys():
+            idy = np.where(ranked_tile_times[idx,ii] > config_struct["max_exposure"])[0]
+            ranked_tile_times[idx[idy],ii] = config_struct["max_exposure"] 
 
     for key, prob, exposureTime, tileprob in zip(keys, ranked_tile_probs, ranked_tile_times, tile_probs):
 
@@ -305,11 +314,13 @@ def absmag_tiles_struct(params, config_struct, telescope, map_struct, tile_struc
                 tile_struct[key]["exposureTime"] = exposureTime
                 tile_struct[key]["nexposures"] = len(params["exposuretimes"])
                 tile_struct[key]["filt"] = params["filters"]
-            
+    
     return tile_struct
 
 
-def powerlaw_tiles_struct(params, config_struct, telescope, map_struct, tile_struct):
+def powerlaw_tiles_struct(params, config_struct, telescope,
+                          map_struct, tile_struct,
+                          catalog_struct=None):
 
     keys = tile_struct.keys()
     ntiles = len(keys)
@@ -324,9 +335,9 @@ def powerlaw_tiles_struct(params, config_struct, telescope, map_struct, tile_str
         prob = map_struct["prob"]
 
     n, cl, dist_exp = params["powerlaw_n"], params["powerlaw_cl"], params["powerlaw_dist_exp"]
-    
+   
     if params["tilesType"] == "galaxy":
-        tile_probs = compute_tiles_map(params, tile_struct, prob, func='center', ipix_keep=map_struct["ipix_keep"])
+        tile_probs = compute_tiles_map(params, tile_struct, prob, func='galaxy', ipix_keep=map_struct["ipix_keep"], catalog_struct=catalog_struct)
     else:
         tile_probs = compute_tiles_map(params, tile_struct, prob, func='np.sum(x)', ipix_keep=map_struct["ipix_keep"])
 
@@ -343,7 +354,7 @@ def powerlaw_tiles_struct(params, config_struct, telescope, map_struct, tile_str
     prob_scaled = prob_scaled / np.nansum(prob_scaled)
    
     if params["tilesType"] == "galaxy":
-        ranked_tile_probs = compute_tiles_map(params, tile_struct, prob_scaled, func='center', ipix_keep=map_struct["ipix_keep"])
+        ranked_tile_probs = compute_tiles_map(params, tile_struct, prob_scaled, func='galaxy', ipix_keep=map_struct["ipix_keep"], catalog_struct=catalog_struct)
     else:
         ranked_tile_probs = compute_tiles_map(params, tile_struct, prob_scaled, func='np.sum(x)', ipix_keep=map_struct["ipix_keep"])
 
@@ -437,7 +448,7 @@ def powerlaw_tiles_struct(params, config_struct, telescope, map_struct, tile_str
                     observability_duration += tile_struct[key]['segmentlist'][counter][1] - tile_struct[key]['segmentlist'][counter][0]
                 if tile_struct[key]['prob'] > 0.0 and observability_duration < min_obs_duration: 
                     prob = 0.0
- 
+
             tile_struct[key]["prob"] = prob
             tile_struct[key]["exposureTime"] = exposureTime
             tile_struct[key]["nexposures"] = int(np.floor(exposureTime/config_struct["exposuretime"]))
@@ -453,7 +464,11 @@ def moc(params, map_struct, moc_structs, doSegments=True):
         config_struct = params["config"][telescope]
         moc_struct = moc_structs[telescope]
 
-        tile_struct = powerlaw_tiles_struct(params, config_struct, telescope, map_struct, moc_struct)
+        if params["timeallocationType"] == "absmag":
+            tile_struct = gwemopt.tiles.absmag_tiles_struct(params, config_struct, telescope, map_struct, moc_struct)
+        elif params["timeallocationType"] == "powerlaw":
+            tile_struct = powerlaw_tiles_struct(params, config_struct, telescope, map_struct, moc_struct)
+
         if doSegments:
             tile_struct = gwemopt.segments.get_segments_tiles(params, config_struct, tile_struct)
         tile_structs[telescope] = tile_struct
@@ -520,11 +535,11 @@ def pem_tiles_struct(params, config_struct, telescope, map_struct, tile_struct):
 
     return tile_struct
 
-def compute_tiles_map(params, tile_struct, skymap, func=None, ipix_keep=[]):
+def compute_tiles_map(params, tile_struct, skymap, func=None, ipix_keep=[],
+                      catalog_struct=None):
 
     if func is None:
         f = lambda x: np.sum(x)
-        
     elif func == 'center':
         keys = tile_struct.keys()
         ntiles = len(keys)
@@ -535,7 +550,16 @@ def compute_tiles_map(params, tile_struct, skymap, func=None, ipix_keep=[]):
             val = skymap[pix_center]
             vals[ii] = val        
         return vals
-    
+    elif func == 'galaxy':
+        keys = tile_struct.keys()
+        ntiles = len(keys)
+        vals = np.nan*np.ones((ntiles,))
+        nside = hp.npix2nside(len(skymap))
+        for ii,key in enumerate(tile_struct.keys()):
+            galaxies = tile_struct[key]["galaxies"]
+            val = np.sum(catalog_struct[params["galaxy_grade"]][galaxies])    
+            vals[ii] = val
+        return vals
     else:
         f = lambda x: eval(func)
 
@@ -559,7 +583,10 @@ def compute_tiles_map(params, tile_struct, skymap, func=None, ipix_keep=[]):
                 vals[ii] = 0.0
             else:
                 vals_to_sum = prob[ipix]
-                vals_to_sum[vals_to_sum < 0] = 0
+                if func == 'np.nanmedian(x)':
+                    vals_to_sum[vals_to_sum < 0] = np.nan
+                else:
+                    vals_to_sum[vals_to_sum < 0] = 0
                 vals[ii] = f(vals_to_sum)
 
         ipix_keep = np.setdiff1d(ipix_keep, tile_struct[key]["ipix"])

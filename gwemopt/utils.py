@@ -449,16 +449,14 @@ def read_skymap(params,is3D=False,map_struct=None):
         distsigma_down = hp.pixelfunc.ud_grade(map_struct["distsigma"],nside_down)
         distnorm_down = hp.pixelfunc.ud_grade(map_struct["distnorm"],nside_down)
 
+        map_struct["distmed"], map_struct["diststd"], mom_norm = ligodist.parameters_to_moments(
+                                                                          map_struct["distmu"],
+                                                                        map_struct["distsigma"])
+
         distmu_down[distmu_down < -1e+30] = np.inf
 
-        r = np.linspace(0, 2000)
-        map_struct["distmed"] = np.zeros(distmu_down.shape)
-        for ipix in range(len(map_struct["distmed"])):
-            dp_dr = r**2 * distnorm_down[ipix] * norm(distmu_down[ipix],distsigma_down[ipix]).pdf(r)
-            dp_dr_norm = np.cumsum(dp_dr / np.sum(dp_dr))
-            idx = np.argmin(np.abs(dp_dr_norm-0.5))
-            map_struct["distmed"][ipix] = r[idx]
-        map_struct["distmed"] = hp.ud_grade(map_struct["distmu"],nside,power=-2)
+        map_struct["distmed"] = hp.ud_grade(map_struct["distmed"],nside,power=-2)
+        map_struct["diststd"] = hp.ud_grade(map_struct["diststd"],nside,power=-2)
 
     npix = hp.nside2npix(nside)
     theta, phi = hp.pix2ang(nside, np.arange(npix))
@@ -905,7 +903,10 @@ def perturb_tiles(params, config_struct, telescope, map_struct, tile_struct):
         map_struct_hold['prob'][moc_struct[key]["ipix"]] = -1
         ipix_keep = np.setdiff1d(ipix_keep, moc_struct[key]["ipix"])
 
-    tile_struct = gwemopt.tiles.powerlaw_tiles_struct(params, config_struct, telescope, map_struct, moc_struct)
+    if params["timeallocationType"] == "absmag":
+        tile_struct = gwemopt.tiles.absmag_tiles_struct(params, config_struct, telescope, map_struct, moc_struct)
+    elif params["timeallocationType"] == "powerlaw":
+        tile_struct = gwemopt.tiles.powerlaw_tiles_struct(params, config_struct, telescope, map_struct, moc_struct)
     tile_struct = gwemopt.segments.get_segments_tiles(params, config_struct, tile_struct)
  
     return tile_struct

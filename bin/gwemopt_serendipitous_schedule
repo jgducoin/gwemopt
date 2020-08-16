@@ -113,8 +113,8 @@ def parse_commandline():
     parser.add_option("--doSchedule",  action="store_true", default=False)
     parser.add_option("--doPlots",  action="store_true", default=False)
     parser.add_option("--doMovie",  action="store_true", default=False)
-
     parser.add_option("--doObservability",  action="store_true", default=False)
+    parser.add_option("--doAirmassWeights",  action="store_true", default=False)
     parser.add_option("--NFields",default=-1,type=int)
     parser.add_option("--doEvaluate",  action="store_true", default=False)
     parser.add_option("--doObsFile",  action="store_true", default=False)
@@ -285,7 +285,7 @@ if opts.doObservability:
         idxs, probs = np.array(idxs), np.array(probs)
         idxsort = np.argsort(probs)[::-1]
         Ntop = idxs[idxsort[:opts.NFields]]
-print(Ntop)
+    print(Ntop)
 params["gpstime"] = opts.gps
 
 params["outputDir"] = baseoutputDir
@@ -481,8 +481,34 @@ if not os.path.isfile(schedulefile):
                 intersect = np.intersect1d(nonzero,ipix_bottom)
                 map_struct["prob"][intersect] = 0.01
 
-                map_struct["prob"] = map_struct["prob"] / np.sum(map_struct["prob"])
-
+            if opts.doAirmassWeights:
+                # get airmass distribution
+                theta, phi = hp.pix2ang(opts.nside, np.arange(npix))
+                radecs = astropy.coordinates.SkyCoord(
+                                      ra=phi*u.rad, dec=(0.5*np.pi - theta)*u.rad)
+                observatory = astropy.coordinates.EarthLocation(
+                                                lat=config_struct["latitude"]*u.deg,
+                                                lon=config_struct["longitude"]*u.deg,
+                                                height=config_struct["elevation"]*u.m)
+                                                
+                # altaz @ halfway point of ~5 hr block
+                midpoint = Time(opts.gps, format='gps', scale='utc') + TimeDelta((Tobs[ii] + 0.2 * 0.5) * u.day)
+                frame = astropy.coordinates.AltAz(obstime=midpoint,
+                                                  location=observatory)
+                altaz = radecs.transform_to(frame)
+                airmass = altaz.secz
+                
+                horizon_mask = altaz.alt.degree <= 30.
+                below_horizon_mask = horizon_mask * 10.**100
+                airmass = airmass + below_horizon_mask
+                
+                # weight by airmass
+                airmass_weights = 10 ** (0.2 * (airmass - 1))
+                
+                map_struct["prob"] = np.divide(map_struct["prob"],airmass_weights)
+            
+            # normalize 2D probability
+            map_struct["prob"] = map_struct["prob"] / np.sum(map_struct["prob"])
 
             moc_structs = gwemopt.moc.create_moc(params)
             tile_structs = gwemopt.tiles.moc(params, map_struct, moc_structs)
@@ -577,16 +603,27 @@ if not os.path.isfile(schedulefile):
                         gwemopt.plotting.coverage(params, map_struct, coverage_struct)
     
         coverage_structs.append(coverage_struct)
+#        coverage_struct_combined = gwemopt.coverage.combine_coverage_structs(coverage_structs)
+        new_sched_file = os.path.join(params["outputDir"],"schedule_ZTF.dat")
+        OG_sched_file = os.path.join(baseoutputDir,"schedule_ZTF.dat")
+        
+        fin = open(new_sched_file, "r")
+        data = fin.read()
+        fout = open(OG_sched_file, "a")
+        fout.write(data)
+        
+        fin.close()
+        fout.close()
+        
+#        params["outputDir"] = baseoutputDir
 
-        coverage_struct_combined = gwemopt.coverage.combine_coverage_structs(coverage_structs)
-        params["outputDir"] = baseoutputDir
-        if opts.doSchedule:
-            print("Summary of coverage...")
-            gwemopt.scheduler.summary(params,map_struct,coverage_struct_combined)
-    
-            if opts.doPlots:
-                if (np.mod(ii, 15) == 0) or (ii == len(Tobs)-2):
-                    gwemopt.plotting.coverage(params, map_struct, coverage_struct_combined)
+#        if opts.doSchedule:
+#            print("Summary of coverage...")
+#            gwemopt.scheduler.summary(params,map_struct,coverage_struct_combined)
+
+#            if opts.doPlots:
+#                if (np.mod(ii, 15) == 0) or (ii == len(Tobs)-2):
+#                    gwemopt.plotting.coverage(params, map_struct, coverage_struct_combined)
         if np.mod(ii+1,5) == 0:
             print(f"for {Tobs[ii]}:")
             print(f"--- {time.time() - start_time:.2f} seconds ---")
@@ -822,9 +859,8 @@ if opts.doObsFile and not os.path.isfile(obsfile):
         obstable_rows = obstable[obstable["jd"] == jd_chosen]
         for ii, row in obstable_rows.iterrows():
             # FIXME
-            #nmag = np.log(exptime/row.exptime)/np.log(2.5)
-            nmag = np.log(exptime/30.0)/np.log(2.5)
-    
+            nmag = np.log(exptime/row.exptime)/np.log(2.5)
+
             fid.write('%.7f, %d, %d, %d, %d, %d, %.2f, %.0f, %d\n'%(jd, field, int(row.chid), program_id, int(row.expid), filter_id, row.limMag+nmag, exptime, int(row.status)))
     
     fid.close()
